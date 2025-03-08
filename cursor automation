@@ -1,0 +1,213 @@
+import requests
+from bs4 import BeautifulSoup
+import pyautogui
+import time
+
+# URLs for the 4 monitor tabs (replace with actual URLs)
+monitor_urls = [
+    "https://smarttrader.deriv.com/",  # Tab 1 (also purchase tab) - REPLACE
+    "https://www.deriv.com/",          # Tab 2 - REPLACE
+    "https://www.deriv.com/digits-pro/home/",  # Tab 3 - REPLACE
+    "https://www.deriv.com/digits-pro/"        # Tab 4 - REPLACE
+]
+
+# Conditions for each tab (strictly following your rules)
+conditions = {
+    monitor_urls[0]: {  # Tab 1: Bars for 7, 8, 9 must not be above 12%
+        "type": "bars_below_12",
+        "digits": [7, 8, 9],
+        "threshold": 12.0
+    },
+    monitor_urls[1]: {  # Tab 2: No colored semi-circle on 7, 8, or 9
+        "type": "no_semi_circle",
+        "forbidden_digits": [7, 8, 9]
+    },
+    monitor_urls[2]: {  # Tab 3: Pink circle must be on 7, 8, or 9
+        "type": "pink_circle",
+        "allowed_digits": [7, 8, 9]
+    },
+    monitor_urls[3]: {  # Tab 4: "Under" % increases from 86.00%-86.99% to >86.99%
+        "type": "percentage_change",
+        "under_range_start": 86.00,
+        "under_range_end": 86.99,
+        "over_target": 89.0  # Kept for consistency, but only "under" is required
+    }
+}
+
+# Placeholder coordinates for the "Under" purchase button - REPLACE WITH ACTUAL COORDINATES
+buy_button_x, buy_button_y = 500, 600  # Update these immediately after finding the correct values
+
+# Check interval and post-buy cooldown
+check_interval = 60    # Check every 60 seconds (adjust if needed)
+post_buy_cooldown = 300  # Pause 5 minutes after a buy (adjust if needed)
+
+def fetch_page_content(url):
+    """
+    Fetch the HTML content of a web page.
+    """
+    try:
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        response.raise_for_status()
+        return BeautifulSoup(response.text, "html.parser")
+    except Exception as e:
+        print(f"Error fetching {url}: {e}")
+        return None
+
+def check_tab1_condition(soup):
+    """
+    Tab 1: Bars for digits 7, 8, 9 must not be above 12%.
+    """
+    if soup is None:
+        return False
+    page_text = soup.get_text()
+    for digit in conditions[monitor_urls[0]]["digits"]:
+        digit_str = str(digit)
+        for line in page_text.split():
+            if digit_str in line and "%" in line:
+                try:
+                    percentage = float(line.replace("%", ""))
+                    if percentage > conditions[monitor_urls[0]]["threshold"]:
+                        print(f"Tab 1: Digit {digit} bar is {percentage}%, exceeds 12%")
+                        return False
+                except ValueError:
+                    continue
+    print("Tab 1: All bars for 7, 8, 9 are ≤ 12%")
+    return True
+
+def check_tab2_condition(soup):
+    """
+    Tab 2: No colored semi-circle on 7, 8, or 9.
+    """
+    if soup is None:
+        return False
+    page_text = soup.get_text().lower()
+    forbidden = conditions[monitor_urls[1]]["forbidden_digits"]
+    for digit in forbidden:
+        # Adjust based on actual HTML structure
+        if f"digit {digit}" in page_text and "colored" in page_text:
+            print(f"Tab 2: Colored semi-circle found on {digit}")
+            return False
+    print("Tab 2: No colored semi-circle on 7, 8, or 9")
+    return True
+
+def check_tab3_condition(soup):
+    """
+    Tab 3: Pink circle must be on 7, 8, or 9.
+    """
+    if soup is None:
+        return False
+    page_text = soup.get_text().lower()
+    allowed = conditions[monitor_urls[2]]["allowed_digits"]
+    pink_count = 0
+    pink_digit = None
+    for digit in range(10):  # Check all digits
+        if f"digit {digit}" in page_text and "pink" in page_text:
+            pink_count += 1
+            pink_digit = digit
+    if pink_count == 1 and pink_digit in allowed:
+        print(f"Tab 3: Pink circle on {pink_digit} (valid)")
+        return True
+    print(f"Tab 3: Pink circle issue - count={pink_count}, digit={pink_digit}")
+    return False
+
+def check_tab4_condition(soup, previous_state=None):
+    """
+    Tab 4: "Under" % increases from 86.00%-86.99% to >86.99%.
+    """
+    if soup is None:
+        return False, None
+    page_text = soup.get_text()
+    under_percent = None
+    over_percent = None
+
+    # Parse percentages - adjust based on actual HTML
+    for line in page_text.split():
+        if "under" in line.lower() and "%" in line:
+            try:
+                under_percent = float(line.replace("%", ""))
+            except ValueError:
+                continue
+        elif "over" in line.lower() and "%" in line:
+            try:
+                over_percent = float(line.replace("%", ""))
+            except ValueError:
+                continue
+
+    if under_percent is None or over_percent is None:
+        print("Tab 4: Could not find Under or Over percentages")
+        return False, {"under": under_percent, "over": over_percent}
+
+    current_state = {"under": under_percent, "over": over_percent}
+    print(f"Tab 4: Under={under_percent}%, Over={over_percent}%")
+
+    if previous_state is None:
+        return False, current_state
+
+    under_range_start = conditions[monitor_urls[3]]["under_range_start"]
+    under_range_end = conditions[monitor_urls[3]]["under_range_end"]
+
+    # Check "Under" condition
+    if (under_range_start <= previous_state["under"] <= under_range_end and
+            under_percent > under_range_end):
+        print(f"Tab 4: Under increased from within {under_range_start}-{under_range_end}% to {under_percent}% (valid)")
+        return True, current_state
+
+    # Optional: "Over" condition (kept for consistency but not required)
+    over_target = conditions[monitor_urls[3]]["over_target"]
+    if (previous_state["over"] == over_target and
+            over_percent not in [x/100 for x in range(8901, 9000)]):  # 89.01-89.99
+        print(f"Tab 4: Over changed from {over_target}% to {over_percent}% (valid)")
+        return True, current_state
+
+    return False, current_state
+
+def monitor_and_buy():
+    """
+    Monitor all tabs and execute purchase when all conditions are met.
+    """
+    previous_tab4_state = None
+
+    print("Starting monitoring...")
+    try:
+        while True:
+            all_conditions_met = True
+            soups = {}
+
+            # Fetch content for all tabs
+            for url in monitor_urls:
+                soups[url] = fetch_page_content(url)
+
+            # Check Tab 1
+            if not check_tab1_condition(soups[monitor_urls[0]]):
+                all_conditions_met = False
+
+            # Check Tab 2
+            if not check_tab2_condition(soups[monitor_urls[1]]):
+                all_conditions_met = False
+
+            # Check Tab 3
+            if not check_tab3_condition(soups[monitor_urls[2]]):
+                all_conditions_met = False
+
+            # Check Tab 4
+            condition_met, previous_tab4_state = check_tab4_condition(
+                soups[monitor_urls[3]], previous_tab4_state)
+            if not condition_met:
+                all_conditions_met = False
+
+            if all_conditions_met:
+                print("All conditions met! Moving cursor to Purchase button...")
+                pyautogui.moveTo(buy_button_x, buy_button_y, duration=0.5)
+                pyautogui.click()  # Click the "Under" purchase button
+                print("Trade executed! Pausing for 5 minutes to avoid repeat buys...")
+                time.sleep(post_buy_cooldown)
+
+            print(f"Waiting {check_interval} seconds before next check...")
+            time.sleep(check_interval)
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+# Run the script
+if _name_ == "_main_":
+    monitor_and_buy()
